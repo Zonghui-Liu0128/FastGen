@@ -19,6 +19,7 @@ import os
 import torch
 from tqdm.auto import tqdm
 
+from diffusers import FlowMatchEulerDiscreteScheduler
 from diffusers.models import WanTransformer3DModel
 from diffusers.image_processor import PipelineImageInput
 from transformers import CLIPImageProcessor, CLIPVisionModel
@@ -345,6 +346,7 @@ class WanI2V(Wan):
         shift: float = 3.0,
         skip_layers: Optional[List[int]] = None,
         skip_layers_start_percent: float = 0.0,
+        solver: str = "unipc",
         **kwargs,
     ) -> torch.Tensor:
         """Sample from the WanI2V model with proper first-frame conditioning.
@@ -353,6 +355,19 @@ class WanI2V(Wan):
         conditioning frame after each scheduler step.
         """
         assert self.schedule_type == "rf", f"{self.schedule_type} is not supported"
+        if solver == "euler":
+            return self._sample_euler(
+                noise=noise,
+                condition=condition,
+                neg_condition=neg_condition,
+                guidance_scale=guidance_scale,
+                num_steps=num_steps,
+                shift=shift,
+                skip_layers=skip_layers,
+                skip_layers_start_percent=skip_layers_start_percent,
+            )
+        if solver != "unipc":
+            raise ValueError(f"Unsupported WanI2V teacher solver: {solver}. Expected 'unipc' or 'euler'.")
 
         # Extract first_frame_cond for replacement after scheduler steps
         first_frame_cond = None
@@ -406,6 +421,74 @@ class WanI2V(Wan):
             latents = self.unipc_scheduler.step(flow_pred, timestep, latents, return_dict=False)[0]
 
             # For I2V: restore first frame to clean conditioning after scheduler step
+            if first_frame_cond is not None and not self.concat_mask:
+                latents = latents.clone()
+                latents[:, :, 0] = first_frame_cond[:, :, 0]
+
+        return latents
+
+    def _sample_euler(
+        self,
+        noise: torch.Tensor,
+        condition: Optional[Dict[str, torch.Tensor]] = None,
+        neg_condition: Optional[Dict[str, torch.Tensor]] = None,
+        guidance_scale: Optional[float] = 5.0,
+        num_steps: int = 40,
+        shift: float = 3.0,
+        skip_layers: Optional[List[int]] = None,
+        skip_layers_start_percent: float = 0.0,
+    ) -> torch.Tensor:
+        first_frame_cond = None
+        if isinstance(condition, dict) and "first_frame_cond" in condition:
+            first_frame_cond = condition["first_frame_cond"]
+
+        scheduler = FlowMatchEulerDiscreteScheduler(shift=shift)
+        scheduler.set_timesteps(num_steps, device=noise.device)
+        timesteps = scheduler.timesteps
+        time_rescale_factor = scheduler.config.num_train_timesteps
+
+        t_init = self.noise_scheduler.safe_clamp(
+            timesteps[0] / time_rescale_factor, min=self.noise_scheduler.min_t, max=self.noise_scheduler.max_t
+        )
+        latents = self.noise_scheduler.latents(noise=noise, t_init=t_init)
+
+        for idx, timestep in tqdm(enumerate(timesteps), total=num_steps):
+            t = (timestep / time_rescale_factor).expand(latents.shape[0])
+            t = self.noise_scheduler.safe_clamp(t, min=self.noise_scheduler.min_t, max=self.noise_scheduler.max_t).to(
+                latents.dtype
+            )
+
+            flow_pred = self(
+                latents,
+                t,
+                condition=condition,
+                r=None,
+                return_features_early=False,
+                feature_indices={},
+                return_logvar=False,
+                fwd_pred_type="flow",
+            )
+
+            if guidance_scale is not None:
+                flow_uncond = self(
+                    latents,
+                    t,
+                    condition=neg_condition,
+                    r=None,
+                    return_features_early=False,
+                    feature_indices={},
+                    return_logvar=False,
+                    fwd_pred_type="flow",
+                    skip_layers=skip_layers if idx >= skip_layers_start_percent * num_steps else None,
+                )
+                flow_pred = flow_uncond + guidance_scale * (flow_pred - flow_uncond)
+
+            if first_frame_cond is not None and not self.concat_mask:
+                flow_pred = flow_pred.clone()
+                flow_pred[:, :, 0] = 0.0
+
+            latents = scheduler.step(flow_pred, timestep, latents, return_dict=False)[0]
+
             if first_frame_cond is not None and not self.concat_mask:
                 latents = latents.clone()
                 latents[:, :, 0] = first_frame_cond[:, :, 0]

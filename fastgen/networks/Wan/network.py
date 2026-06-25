@@ -23,7 +23,7 @@ import torch
 import torch.nn as nn
 from torch import dtype
 from torch.distributed.fsdp import fully_shard
-from diffusers import UniPCMultistepScheduler
+from diffusers import FlowMatchEulerDiscreteScheduler, UniPCMultistepScheduler
 
 from diffusers.models import WanTransformer3DModel, AutoencoderKLWan
 from diffusers.models.transformers.transformer_wan import WanTransformerBlock, WanRotaryPosEmbed
@@ -921,9 +921,10 @@ class Wan(FastGenNetwork):
         shift: float = 5.0,
         skip_layers: Optional[List[int]] = None,
         skip_layers_start_percent: float = 0.0,
+        solver: str = "unipc",
         **kwargs,
     ) -> torch.Tensor:
-        """Multistep sample using the UniPC method
+        """Multistep sample using the selected teacher solver.
 
         Args:
             noise (torch.Tensor): The noisy latents to start from.
@@ -939,6 +940,19 @@ class Wan(FastGenNetwork):
             torch.Tensor: The sample output.
         """
         assert self.schedule_type == "rf", f"{self.schedule_type} is not supported"
+        if solver == "euler":
+            return self._sample_euler(
+                noise=noise,
+                condition=condition,
+                neg_condition=neg_condition,
+                guidance_scale=guidance_scale,
+                num_steps=num_steps,
+                shift=shift,
+                skip_layers=skip_layers,
+                skip_layers_start_percent=skip_layers_start_percent,
+            )
+        if solver != "unipc":
+            raise ValueError(f"Unsupported Wan teacher solver: {solver}. Expected 'unipc' or 'euler'.")
 
         self.unipc_scheduler.config.flow_shift = shift
         self.unipc_scheduler.set_timesteps(num_inference_steps=num_steps, device=noise.device)
@@ -979,6 +993,62 @@ class Wan(FastGenNetwork):
                 flow_pred = flow_uncond + guidance_scale * (flow_pred - flow_uncond)
 
             latents = self.unipc_scheduler.step(flow_pred, timestep, latents, return_dict=False)[0]
+
+        return latents
+
+    def _sample_euler(
+        self,
+        noise: torch.Tensor,
+        condition: Optional[Dict[str, torch.Tensor]] = None,
+        neg_condition: Optional[Dict[str, torch.Tensor]] = None,
+        guidance_scale: Optional[float] = 5.0,
+        num_steps: int = 50,
+        shift: float = 5.0,
+        skip_layers: Optional[List[int]] = None,
+        skip_layers_start_percent: float = 0.0,
+    ) -> torch.Tensor:
+        scheduler = FlowMatchEulerDiscreteScheduler(shift=shift)
+        scheduler.set_timesteps(num_steps, device=noise.device)
+        timesteps = scheduler.timesteps
+        time_rescale_factor = scheduler.config.num_train_timesteps
+
+        t_init = self.noise_scheduler.safe_clamp(
+            timesteps[0] / time_rescale_factor, min=self.noise_scheduler.min_t, max=self.noise_scheduler.max_t
+        )
+        latents = self.noise_scheduler.latents(noise=noise, t_init=t_init)
+
+        for idx, timestep in tqdm(enumerate(timesteps), total=num_steps):
+            t = (timestep / time_rescale_factor).expand(latents.shape[0])
+            t = self.noise_scheduler.safe_clamp(t, min=self.noise_scheduler.min_t, max=self.noise_scheduler.max_t).to(
+                latents.dtype
+            )
+
+            flow_pred = self(
+                latents,
+                t,
+                condition=condition,
+                r=None,
+                return_features_early=False,
+                feature_indices={},
+                return_logvar=False,
+                fwd_pred_type="flow",
+            )
+
+            if guidance_scale is not None:
+                flow_uncond = self(
+                    latents,
+                    t,
+                    condition=neg_condition,
+                    r=None,
+                    return_features_early=False,
+                    feature_indices={},
+                    return_logvar=False,
+                    fwd_pred_type="flow",
+                    skip_layers=skip_layers if idx >= skip_layers_start_percent * num_steps else None,
+                )
+                flow_pred = flow_uncond + guidance_scale * (flow_pred - flow_uncond)
+
+            latents = scheduler.step(flow_pred, timestep, latents, return_dict=False)[0]
 
         return latents
 

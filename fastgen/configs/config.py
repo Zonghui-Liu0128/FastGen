@@ -103,6 +103,8 @@ class BaseModelConfig:
 
     # guidance scale for classifier-free guidance in teacher diffusion model. None means no guidance.
     guidance_scale: Optional[float] = None
+    # teacher sampler/solver used by networks that support multiple inference solvers.
+    teacher_solver: str = "unipc"
 
     # enable skip layer guidance (currently only wan network has the skip_layers option in cfg)
     skip_layers: List[int] | None = None

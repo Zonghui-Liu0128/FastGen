@@ -681,10 +681,13 @@ def main(args, config: BaseConfig):
         # Teacher sampling
         if has_teacher_sampling:
             start_time = time.time()
+            teacher_solver = getattr(config.model, "teacher_solver", "unipc")
+            teacher_solver_tag = "" if teacher_solver == "unipc" else f"_{teacher_solver}"
             teacher_kwargs = {
                 "condition": condition,
                 "neg_condition": neg_condition_sample,
                 "num_steps": args.num_steps,
+                "solver": teacher_solver,
                 "second_order": False,
                 "precision_amp": model.precision_amp_infer,
                 "fps": torch.full((noise.shape[0],), float(args.fps), device=noise.device),
@@ -697,7 +700,7 @@ def main(args, config: BaseConfig):
             logger.info(f"Teacher sampling time: {sampling_time:.2f}s")
             save_path = (
                 save_dir
-                / f"teacher_cfg{config.model.guidance_scale}_steps{args.num_steps}{slg_tag}{i2v_tag}_{i:04d}_seed{seed}.mp4"
+                / f"teacher_cfg{config.model.guidance_scale}{teacher_solver_tag}_steps{args.num_steps}{slg_tag}{i2v_tag}_{i:04d}_seed{seed}.mp4"
             )
             basic_utils.save_media(video_teacher, str(save_path), vae=vae, **save_video_kwargs)
 
