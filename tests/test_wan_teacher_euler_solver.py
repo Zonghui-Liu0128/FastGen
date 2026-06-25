@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib
+from pathlib import Path
 import sys
 import types
 
@@ -178,6 +179,14 @@ def test_base_model_config_defaults_teacher_solver_to_unipc(monkeypatch):
     config_module = importlib.import_module("fastgen.configs.config")
 
     assert config_module.BaseModelConfig().teacher_solver == "unipc"
+
+
+def test_video_inference_exposes_teacher_solver_cli_override():
+    source = Path("scripts/inference/video_model_inference.py").read_text()
+
+    assert '"--teacher_solver"' in source
+    assert 'choices=["unipc", "euler"]' in source
+    assert 'args.teacher_solver or getattr(config.model, "teacher_solver", "unipc")' in source
 
 
 def test_wan_teacher_sample_uses_flowmatch_euler_when_requested(monkeypatch):

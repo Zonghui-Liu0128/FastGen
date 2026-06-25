@@ -681,7 +681,7 @@ def main(args, config: BaseConfig):
         # Teacher sampling
         if has_teacher_sampling:
             start_time = time.time()
-            teacher_solver = getattr(config.model, "teacher_solver", "unipc")
+            teacher_solver = args.teacher_solver or getattr(config.model, "teacher_solver", "unipc")
             teacher_solver_tag = "" if teacher_solver == "unipc" else f"_{teacher_solver}"
             teacher_kwargs = {
                 "condition": condition,
@@ -791,6 +791,12 @@ if __name__ == "__main__":
         default=50,
         type=int,
         help="Number of sampling steps for teacher (default: 50)",
+    )
+    parser.add_argument(
+        "--teacher_solver",
+        default=None,
+        choices=["unipc", "euler"],
+        help="Override teacher sampling solver. If omitted, uses config.model.teacher_solver.",
     )
     # I2V arguments
     parser.add_argument(
