@@ -193,6 +193,7 @@ class WandbCallback(Callback):
         validation_logging_step: int = 1,
         sample_logging_iter: Optional[int] = None,
         vid_format: str = "mp4",
+        log_media: bool = True,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -201,6 +202,7 @@ class WandbCallback(Callback):
         self.sample_logging_iter = sample_logging_iter
         self.val_sample_map = None
         self.vid_format = vid_format
+        self.log_media = log_media
         self.loss_dict_record = _LossDictRecord()
         self.val_loss_dict_record = _LossDictRecord()
 
@@ -342,6 +344,8 @@ class WandbCallback(Callback):
         iteration: int = 0,
         group: str = "train",
     ) -> None:
+        if not self.log_media:
+            return
         sample_map = self.get_sample_map(model, data_batch, output_batch)
         sample_map = {f"{group}_media/{k}{suffix}": v for k, v in sample_map.items()}
         if wandb.run:
@@ -376,7 +380,7 @@ class WandbCallback(Callback):
         if iteration % self.config.trainer.logging_iter == 0 or iteration == 1:
             self.log_stats(self.loss_dict_record, iteration=iteration, group="train")
             logged = True
-        if iteration % self.sample_logging_iter == 0 or iteration == 1:
+        if self.log_media and (iteration % self.sample_logging_iter == 0 or iteration == 1):
             self.log_sample_map(model, data_batch, output_batch, iteration=iteration, group="train")
             logged = True
         if logged:
@@ -395,7 +399,7 @@ class WandbCallback(Callback):
     ) -> None:
         self.val_loss_dict_record.add(loss_dict)
 
-        if step % self.validation_logging_step == 0:
+        if self.log_media and step % self.validation_logging_step == 0:
             self.log_sample_map(
                 model, data_batch, output_batch, suffix=f"_{step}", iteration=iteration, group=f"val{idx}"
             )

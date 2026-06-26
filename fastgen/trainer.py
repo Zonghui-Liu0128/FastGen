@@ -414,9 +414,41 @@ class Trainer:
                         data[k] = model.net.text_encoder.encode(data[k])
 
             # Context for i2v/vid2vid
-            if "real_raw" in data:
-                if getattr(model.net, "is_i2v", False):  # extra vid context for i2v
-                    # compute input for I2V models
+            if getattr(model.net, "is_i2v", False):  # extra vid context for i2v
+                if "first_frame_cond" in data and not hasattr(model.net, "vae"):
+                    first_frame_cond = data["first_frame_cond"]
+                    real_data = data.get("real")
+                    if isinstance(first_frame_cond, torch.Tensor) and isinstance(real_data, torch.Tensor):
+                        if first_frame_cond.ndim != real_data.ndim:
+                            raise ValueError(
+                                "first_frame_cond must have the same rank as real latent data: "
+                                f"{first_frame_cond.shape} vs {real_data.shape}"
+                            )
+                        expected_dims = (real_data.shape[0], real_data.shape[1], *real_data.shape[-2:])
+                        actual_dims = (
+                            first_frame_cond.shape[0],
+                            first_frame_cond.shape[1],
+                            *first_frame_cond.shape[-2:],
+                        )
+                        if actual_dims != expected_dims:
+                            raise ValueError(
+                                "first_frame_cond must match real latent batch/channel/spatial dimensions: "
+                                f"{first_frame_cond.shape} vs {real_data.shape}"
+                            )
+                        if model.net.concat_mask and first_frame_cond.shape[2] == 1:
+                            padding_shape = (
+                                first_frame_cond.shape[0],
+                                first_frame_cond.shape[1],
+                                real_data.shape[2] - 1,
+                                first_frame_cond.shape[-2],
+                                first_frame_cond.shape[-1],
+                            )
+                            data["first_frame_cond"] = torch.cat(
+                                [first_frame_cond, first_frame_cond.new_zeros(*padding_shape)], dim=2
+                            )
+                    logger.debug("Using precomputed latent first_frame_cond from dataloader.")
+                elif "real_raw" in data:
+                    # compute input for I2V models from raw video pixels
                     real_raw_first_frame = data["real_raw"][:, :, 0:1]
                     bsz, channels = real_raw_first_frame.shape[0:2]
                     num_frames, height, width = data["real_raw"].shape[2:]
@@ -442,6 +474,7 @@ class Trainer:
                                 "while pretrained Wan2.1 I2V uses VAE-encoded zeros."
                             )
 
+            if "real_raw" in data:
                 if hasattr(model.net, "image_encoder"):
                     # Encode the first video frame with CLIP
                     data["encoder_hidden_states_image"] = model.net.image_encoder.encode(data["real_raw"][:, :, 0])
