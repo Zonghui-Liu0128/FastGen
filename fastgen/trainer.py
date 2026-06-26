@@ -224,7 +224,10 @@ class Trainer:
         # validation in the end
         if dataloader_val is not None:
             self.validate(model_ddp, model, dataloader_val, iteration=self.config.trainer.max_iter)
-        self.save_checkpoint(model, self.config.trainer.max_iter)
+        if getattr(self.config.trainer, "save_final_ckpt", True):
+            self.save_checkpoint(model, self.config.trainer.max_iter)
+        else:
+            logger.info("Skipping final checkpoint save because trainer.save_final_ckpt is False.")
         self.callbacks.on_train_end(model, iteration=self.config.trainer.max_iter)
         self.callbacks.on_app_end(model, iteration=self.config.trainer.max_iter)
         logger.info("Taking a 10 sec nap and exiting training.")
@@ -263,22 +266,34 @@ class Trainer:
     def save_checkpoint(self, model: FastGenModel, iteration: int, path: str | None = None) -> str:
         logger.info(f"Saving checkpoint iteration {iteration}")
         self.callbacks.on_save_checkpoint_start(model, iteration=iteration)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        synchronize()
+
         # awaken the dataloader to avoid timeout
+        checkpointer_config = self.config.trainer.checkpointer
         path = self.checkpointer.save(
             model.model_dict,
-            optimizer_dict=model.optimizer_dict,
-            scheduler_dict=model.scheduler_dict,
-            grad_scaler=model.grad_scaler,
-            callbacks=self.callbacks,
+            optimizer_dict=model.optimizer_dict if getattr(checkpointer_config, "save_optimizer", True) else None,
+            scheduler_dict=model.scheduler_dict if getattr(checkpointer_config, "save_scheduler", True) else None,
+            grad_scaler=model.grad_scaler if getattr(checkpointer_config, "save_grad_scaler", True) else None,
+            callbacks=self.callbacks if getattr(checkpointer_config, "save_callbacks", True) else None,
             path=path,
             iteration=iteration,
         )
         self.callbacks.on_save_checkpoint_success(model, iteration=iteration, path=path)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        synchronize()
+
         # Explicitly clear memory after checkpointing: we need this to
         # avoid OOM during wandb logging where the VAE is loaded and
         # used for decoding
         gc.collect()
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        synchronize()
         self.callbacks.on_save_checkpoint_end(model, iteration=iteration)
         return path
 

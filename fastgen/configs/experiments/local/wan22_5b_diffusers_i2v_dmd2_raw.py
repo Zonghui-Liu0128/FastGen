@@ -64,7 +64,10 @@ def create_config():
     config.trainer.save_ckpt_iter = 500
     config.trainer.validation_iter = 1_000_000
     config.trainer.seed = 1
-    config.trainer.checkpointer.save_optimizer = True
+    # Saving two 5B AdamW optimizer states (net + fake_score) is very heavy with
+    # FSDP/DCP and can leave some ranks stuck in CPU/I/O after the first save.
+    # Keep the first stable raw run to model weights plus lightweight state.
+    config.trainer.checkpointer.save_optimizer = False
     config.trainer.checkpointer.save_scheduler = True
     config.trainer.checkpointer.save_grad_scaler = True
     config.trainer.checkpointer.save_callbacks = True
