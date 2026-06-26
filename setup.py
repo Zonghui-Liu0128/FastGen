@@ -13,7 +13,7 @@ def read_requirements():
 
 setup(
     name="fastgen",
-    version="0.1.0",
+    version="0.3.0",
     description="FastGen is a PyTorch-based framework for building fast generative models using various distillation and acceleration techniques.",
     license="Apache-2.0",
     packages=find_packages(),

@@ -86,6 +86,7 @@ from scripts.inference.inference_utils import (
     setup_inference_modules,
     add_common_args,
 )
+from scripts.inference.lora_utils import load_lora_adapter
 
 if TYPE_CHECKING:
     from fastgen.methods import FastGenModel
@@ -573,6 +574,13 @@ def main(args, config: BaseConfig):
     )
     ctx = {"dtype": model.precision, "device": model.device}
 
+    loaded_lora_modules = set()
+    for module in (teacher, student):
+        if module is not None and id(module) not in loaded_lora_modules:
+            if load_lora_adapter(module, args, ctx):
+                logger.info(f"Loaded LoRA from {args.lora_path} with scale {args.lora_scale}")
+            loaded_lora_modules.add(id(module))
+
     # Check if we have at least one valid sampling path
     has_teacher_sampling = teacher is not None and hasattr(teacher, "sample")
     has_student_sampling = student is not None and hasattr(model, "generator_fn")
@@ -788,6 +796,18 @@ if __name__ == "__main__":
         default=50,
         type=int,
         help="Number of sampling steps for teacher (default: 50)",
+    )
+    parser.add_argument(
+        "--lora_path",
+        default=None,
+        type=str,
+        help="Optional LoRA directory, Hugging Face repo id, or local LoRA weight file to load into the Wan transformer.",
+    )
+    parser.add_argument(
+        "--lora_scale",
+        default=1.0,
+        type=float,
+        help="LoRA adapter scale (default: 1.0).",
     )
     # I2V arguments
     parser.add_argument(

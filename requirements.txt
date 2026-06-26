@@ -6,6 +6,7 @@ wandb[media]
 diffusers==0.35.1
 transformers==4.49.0
 accelerate
+peft
 safetensors
 scipy
 einops
