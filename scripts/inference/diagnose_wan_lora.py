@@ -103,6 +103,25 @@ def resolve_lora_for_direct_loader(lora_path: str, weight_name: str | None) -> t
     return lora_path, kwargs
 
 
+def resolve_lora_for_official_loader(lora_path: str, weight_name: str | None) -> tuple[str, dict[str, str]]:
+    path = Path(lora_path).expanduser()
+    local_path = path if path.is_absolute() else Path.cwd() / path
+
+    if local_path.is_file():
+        return str(local_path.parent), {"weight_name": local_path.name}
+
+    if local_path.is_dir():
+        if weight_name is not None:
+            return str(local_path), {"weight_name": weight_name}
+        local_file = resolve_local_lora_file(lora_path, weight_name)
+        if local_file is not None:
+            return str(local_file.parent), {"weight_name": local_file.name}
+        return str(local_path), {}
+
+    kwargs = {"weight_name": weight_name} if weight_name else {}
+    return lora_path, kwargs
+
+
 def resolve_local_lora_file(lora_path: str, weight_name: str | None) -> Path | None:
     path = Path(lora_path).expanduser()
     local_path = path if path.is_absolute() else Path.cwd() / path
@@ -326,14 +345,15 @@ def load_lora_current_v03(transformer: torch.nn.Module, args: argparse.Namespace
 def load_lora_official_wan(transformer: torch.nn.Module, args: argparse.Namespace, adapter_name: str) -> None:
     from diffusers.loaders.lora_pipeline import WanLoraLoaderMixin
 
+    source, source_kwargs = resolve_lora_for_official_loader(args.lora_path, args.weight_name)
     kwargs: dict[str, Any] = {
         "local_files_only": args.local_files_only,
         "return_lora_metadata": True,
+        **source_kwargs,
     }
-    if args.weight_name:
-        kwargs["weight_name"] = args.weight_name
 
-    result = WanLoraLoaderMixin.lora_state_dict(args.lora_path, **kwargs)
+    print(f"official_lora_state_dict_call: source={source} kwargs={kwargs}")
+    result = WanLoraLoaderMixin.lora_state_dict(source, **kwargs)
     if isinstance(result, tuple) and len(result) == 2:
         state_dict, metadata = result
     elif isinstance(result, tuple) and len(result) == 3:
@@ -372,7 +392,8 @@ def tensor_from_model_output(output: Any) -> torch.Tensor:
 def run_forward_difference(transformer: torch.nn.Module, args: argparse.Namespace, adapter_name: str) -> None:
     log_section("Forward difference check")
     device = next(transformer.parameters()).device
-    dtype = next(transformer.parameters()).dtype
+    latent_dtype = transformer.patch_embedding.weight.dtype
+    text_dtype = transformer.condition_embedder.text_embedder.linear_1.weight.dtype
     config = transformer.config
     patch_size = tuple(config.patch_size)
     frames = max(args.forward_frames, patch_size[0])
@@ -391,7 +412,7 @@ def run_forward_difference(transformer: torch.nn.Module, args: argparse.Namespac
         width,
         generator=generator,
         device=device,
-        dtype=dtype,
+        dtype=latent_dtype,
     )
     encoder_hidden_states = torch.randn(
         1,
@@ -399,9 +420,9 @@ def run_forward_difference(transformer: torch.nn.Module, args: argparse.Namespac
         config.text_dim,
         generator=generator,
         device=device,
-        dtype=dtype,
+        dtype=text_dtype,
     )
-    timestep = torch.full((1,), 0.5, device=device, dtype=dtype)
+    timestep = torch.full((1,), 0.5, device=device, dtype=torch.float32)
 
     with torch.no_grad():
         transformer.set_adapters(adapter_name, weights=0.0)
@@ -456,7 +477,12 @@ def run_loader_mode(args: argparse.Namespace, mode: str) -> LayerStats | None:
             ok(f"{mode}: injected {stats.count} LoRA layers with non-zero B weights in {stats.nonzero_b} layers.")
 
         if args.forward_check:
-            run_forward_difference(transformer, args, adapter_name)
+            try:
+                run_forward_difference(transformer, args, adapter_name)
+            except Exception as exc:
+                fail(f"{mode} forward_check: {type(exc).__name__}: {exc}")
+                if args.verbose:
+                    traceback.print_exc()
         return stats
     except Exception as exc:
         fail(f"{mode}: {type(exc).__name__}: {exc}")
