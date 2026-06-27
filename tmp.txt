@@ -1,0 +1,139 @@
+Wan2.2 TI2V 5B Diffusers DMD2 inference config and commands
+
+Recommended config
+==================
+
+Save as a Python config file, for example:
+fastgen/configs/experiments/local/wan22_5b_ti2v_dmd2_infer.py
+
+```python
+from copy import deepcopy
+
+import fastgen.configs.methods.config_dmd2 as config_dmd2_default
+from fastgen.configs.data import VideoLoaderConfig
+from fastgen.configs.net import Wan22_I2V_5B_Config
+
+
+MODEL_DIR = "/srv/workspace/Kirin_AI_Workspace/TMG_I/l00832862/shared_checkpoints/Wan2.2-TI2V-5B-Diffusers"
+
+
+def create_config():
+    config = config_dmd2_default.create_config()
+
+    config.model.net = deepcopy(Wan22_I2V_5B_Config)
+    config.model.net.model_id_or_local_path = MODEL_DIR
+    config.model.enable_preprocessors = True
+
+    # Wan2.2 TI2V 5B latent shape is [C, T, H, W].
+    # Spatial VAE compression is 16x and temporal compression is 4x.
+    # [48, 21, 44, 80] corresponds to 1280x704 with 81 pixel frames.
+    config.model.input_shape = [48, 21, 44, 80]
+    config.model.precision = "bfloat16"
+
+    # Teacher CFG. For DMD2 student inference, CFG is expected to have been
+    # distilled into the student during training.
+    config.model.guidance_scale = 5.0
+
+    # Two-step DMD2 student inference.
+    config.model.student_sample_type = "ode"
+    config.model.student_sample_steps = 2
+    config.model.sample_t_cfg.t_list = [0.999, 0.833, 0.0]
+
+    # Training-time time sampling config. This does not control teacher
+    # inference, and student inference uses t_list when it is provided.
+    config.model.sample_t_cfg.time_dist_type = "shifted"
+    config.model.sample_t_cfg.shift = 5.0
+    config.model.sample_t_cfg.min_t = 0.001
+    config.model.sample_t_cfg.max_t = 0.999
+
+    # Inference-only setting: avoid constructing the GAN discriminator.
+    # Note that DMD2Model still constructs fake_score.
+    config.model.gan_loss_weight_gen = 0.0
+
+    # The inference entrypoint calls setup(..., evaluation=True), which disables
+    # fsdp_meta_init. Keep it false in this inference config for clarity.
+    config.model.fsdp_meta_init = False
+    config.trainer.ddp = False
+    config.trainer.fsdp = False
+
+    # Dataloader fields are not used by the inference script, but keep them
+    # consistent in case the config is inspected or reused.
+    config.dataloader_train = deepcopy(VideoLoaderConfig)
+    config.dataloader_train.batch_size = 1
+    config.dataloader_train.img_size = (
+        config.model.input_shape[-1] * 16,
+        config.model.input_shape[-2] * 16,
+    )
+    config.dataloader_train.sequence_length = (config.model.input_shape[1] - 1) * 4 + 1
+
+    config.log_config.group = "wan22_5b_i2v_dmd2_infer"
+    config.log_config.name = "1280x704_81f_2steps"
+    config.log_config.wandb_mode = "disabled"
+    return config
+```
+
+If the target is 832x480 with 81 pixel frames, use:
+
+```python
+config.model.input_shape = [48, 21, 30, 52]
+```
+
+
+Teacher inference method
+========================
+
+Teacher inference runs the original Wan2.2 TI2V 5B model with multi-step
+sampling. It uses `model.guidance_scale` for CFG and `--num_steps` for the
+teacher sampler.
+
+```bash
+PYTHONPATH=$(pwd) FASTGEN_OUTPUT_ROOT=FASTGEN_OUTPUT python scripts/inference/video_model_inference.py \
+  --config fastgen/configs/experiments/local/wan22_5b_ti2v_dmd2_infer.py \
+  --do_student_sampling False \
+  --do_teacher_sampling True \
+  --num_steps 50 \
+  --fps 16 \
+  --prompt_file scripts/inference/prompts/validation_aug_qwen_2_5_14b_seed42.txt \
+  --neg_prompt_file scripts/inference/prompts/negative_prompt.txt \
+  --input_image_file scripts/inference/prompts/source_image_paths.txt \
+  - model.guidance_scale=5.0
+```
+
+Important teacher notes:
+
+- `model.guidance_scale=5.0` is used by teacher sampling.
+- `model.sample_t_cfg.shift` is not used by teacher inference. The WanI2V
+  teacher sampler has its own `shift` default.
+- `input_shape` controls the latent video size and therefore the output
+  resolution and frame count.
+
+
+Student inference method
+========================
+
+Student inference runs the distilled DMD2 student. Use this only with a valid
+DMD2 student checkpoint. Without `--ckpt_path`, the script will sample from the
+non-distilled initialized model, which is not the intended result.
+
+```bash
+PYTHONPATH=$(pwd) FASTGEN_OUTPUT_ROOT=FASTGEN_OUTPUT python scripts/inference/video_model_inference.py \
+  --config fastgen/configs/experiments/local/wan22_5b_ti2v_dmd2_infer.py \
+  --ckpt_path /path/to/dmd2_student_checkpoint \
+  --do_student_sampling True \
+  --do_teacher_sampling False \
+  --fps 16 \
+  --prompt_file scripts/inference/prompts/validation_aug_qwen_2_5_14b_seed42.txt \
+  --neg_prompt_file scripts/inference/prompts/negative_prompt.txt \
+  --input_image_file scripts/inference/prompts/source_image_paths.txt
+```
+
+Important student notes:
+
+- `student_sample_steps=2` and `sample_t_cfg.t_list=[0.999, 0.833, 0.0]`
+  define the two-step DMD2 student path.
+- `student_sample_type="ode"` uses deterministic ODE-style transitions.
+- Runtime CFG is not applied inside the generic DMD2 student sampling loop.
+  The CFG behavior should come from the DMD2 training target.
+- The I2V condition for Wan2.2 TI2V 5B is the first-frame latent replacement
+  path, not Wan2.1 mask concatenation.
+
